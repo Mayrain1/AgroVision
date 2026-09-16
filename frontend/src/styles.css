@@ -1,0 +1,182 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  color: #162018;
+  background: #f4f7f0;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.page {
+  min-height: 100vh;
+  padding: 40px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-shell {
+  width: min(920px, 100%);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 28px;
+  align-items: start;
+}
+
+.intro {
+  padding: 12px 0;
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  color: #54704c;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 14px;
+  font-size: clamp(2.4rem, 5vw, 4.5rem);
+  line-height: 0.95;
+}
+
+.intro p:last-child {
+  max-width: 430px;
+  color: #536155;
+  line-height: 1.6;
+}
+
+.analysis-form,
+.result {
+  border: 1px solid #d9e2d2;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 48px rgba(58, 76, 52, 0.12);
+}
+
+.analysis-form {
+  padding: 24px;
+  display: grid;
+  gap: 18px;
+}
+
+label {
+  display: grid;
+  gap: 8px;
+  color: #344335;
+  font-weight: 700;
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid #cdd8c5;
+  border-radius: 6px;
+  padding: 12px 14px;
+  color: #162018;
+  background: #fbfdf9;
+}
+
+textarea {
+  resize: vertical;
+}
+
+input:focus,
+textarea:focus {
+  outline: 3px solid #cfe9c8;
+  border-color: #5d9153;
+}
+
+button {
+  border: 0;
+  border-radius: 6px;
+  padding: 13px 18px;
+  color: #ffffff;
+  background: #2f6b3d;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.error {
+  grid-column: 2;
+  margin: 0;
+  color: #a13333;
+  font-weight: 700;
+}
+
+.result {
+  grid-column: 2;
+  padding: 24px;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.result-grid div {
+  border-radius: 6px;
+  padding: 14px;
+  background: #eef5e9;
+}
+
+.result span {
+  display: block;
+  margin-bottom: 6px;
+  color: #64705f;
+  font-size: 0.85rem;
+}
+
+.result strong {
+  display: block;
+}
+
+.result ul {
+  margin: 0 0 22px;
+  padding-left: 20px;
+}
+
+.result li {
+  margin-bottom: 8px;
+}
+
+@media (max-width: 760px) {
+  .page {
+    align-items: flex-start;
+    padding-top: 28px;
+  }
+
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .error,
+  .result {
+    grid-column: 1;
+  }
+}
