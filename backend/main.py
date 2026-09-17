@@ -1,12 +1,14 @@
+import base64
 import json
 import os
 from typing import List
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, OpenAIError
 from pydantic import BaseModel, ValidationError
+from starlette.datastructures import UploadFile
 
 load_dotenv()
 app = FastAPI(title="AgroVision API")
@@ -21,6 +23,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+MAX_IMAGE_SIZE = 5 * 1024 * 1024
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 ANALYZE_SCHEMA = {
     "type": "object",
@@ -73,8 +78,78 @@ def get_openai_client() -> OpenAI:
     return OpenAI()
 
 
-@app.post("/api/analyze", response_model=AnalyzeResponse)
-def analyze_crop(payload: AnalyzeRequest) -> AnalyzeResponse:
+def validate_text_payload(crop: str, description: str) -> AnalyzeRequest:
+    try:
+        return AnalyzeRequest.model_validate(
+            {
+                "crop": crop,
+                "description": description,
+            }
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Crop and description are required.",
+        ) from exc
+
+
+async def read_image_upload(image: UploadFile) -> str:
+    if image.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail="Unsupported image format. Please upload JPG, PNG, or WEBP.",
+        )
+
+    image_bytes = await image.read()
+    if not image_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail="Image file is empty.",
+        )
+
+    if len(image_bytes) > MAX_IMAGE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail="Image is too large. Maximum size is 5 MB.",
+        )
+
+    encoded_image = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{image.content_type};base64,{encoded_image}"
+
+
+def build_input(crop: str, description: str, image_data_url: str | None = None):
+    prompt = (
+        f"Crop: {crop}\n"
+        f"Description: {description}\n\n"
+        "Analyze the plant image when provided together with the crop name and "
+        "symptom description. Provide a preliminary likely problem, confidence "
+        "from 0 to 1, practical next steps, calculation as null, and one "
+        "follow-up question. If the image is not informative enough, say so in "
+        "the result and ask for the most useful next detail or photo."
+    )
+
+    if not image_data_url:
+        return prompt
+
+    return [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": prompt,
+                },
+                {
+                    "type": "input_image",
+                    "image_url": image_data_url,
+                    "detail": "auto",
+                },
+            ],
+        }
+    ]
+
+
+def request_openai_analysis(payload: AnalyzeRequest, image_data_url: str | None = None) -> AnalyzeResponse:
     client = get_openai_client()
 
     try:
@@ -82,17 +157,14 @@ def analyze_crop(payload: AnalyzeRequest) -> AnalyzeResponse:
             model="gpt-4.1-mini",
             instructions=(
                 "You are AgroVision, an assistant for preliminary crop health "
-                "analysis. Analyze the user's crop and symptom description. "
+                "analysis. Analyze the user's plant image, crop name, and "
+                "symptom description. "
                 "Return only the structured JSON requested by the schema. "
-                "Do not claim certainty; this is not a replacement for lab or "
-                "field diagnostics."
+                "Do not claim certainty or invent details that cannot be "
+                "determined from the image and text. This is not a replacement "
+                "for lab or field diagnostics."
             ),
-            input=(
-                f"Crop: {payload.crop}\n"
-                f"Description: {payload.description}\n\n"
-                "Provide a likely problem, confidence from 0 to 1, practical "
-                "next steps, calculation as null, and one follow-up question."
-            ),
+            input=build_input(payload.crop, payload.description, image_data_url),
             text={
                 "format": {
                     "type": "json_schema",
@@ -112,17 +184,57 @@ def analyze_crop(payload: AnalyzeRequest) -> AnalyzeResponse:
             detail="OpenAI API is currently unavailable. Please try again later.",
         ) from exc
     except APIError as exc:
+        print(f"OPENAI API ERROR: {exc}")
         raise HTTPException(
             status_code=502,
-            detail="OpenAI API request failed. Please check backend logs and try again.",
+            detail="OpenAI API request failed.",
         ) from exc
     except OpenAIError as exc:
+        print(f"OPENAI SDK ERROR: {exc}")
         raise HTTPException(
             status_code=502,
-            detail="OpenAI SDK request failed. Please check backend configuration.",
+            detail="OpenAI SDK request failed.",
         ) from exc
     except (json.JSONDecodeError, ValidationError) as exc:
         raise HTTPException(
             status_code=502,
             detail="OpenAI returned an invalid analysis format.",
         ) from exc
+
+
+@app.post("/api/analyze", response_model=AnalyzeResponse)
+async def analyze_crop(request: Request) -> AnalyzeResponse:
+    content_type = request.headers.get("content-type", "")
+
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        payload = validate_text_payload(
+            crop=str(form.get("crop") or ""),
+            description=str(form.get("description") or ""),
+        )
+
+        image = form.get("image")
+        if not isinstance(image, UploadFile):
+            raise HTTPException(
+                status_code=400,
+                detail="Plant image is required.",
+            )
+
+        image_data_url = await read_image_upload(image)
+        return request_openai_analysis(payload, image_data_url)
+
+    if content_type.startswith("application/json"):
+        try:
+            payload = AnalyzeRequest.model_validate(await request.json())
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Crop and description are required.",
+            ) from exc
+
+        return request_openai_analysis(payload)
+
+    raise HTTPException(
+        status_code=415,
+        detail="Unsupported request type. Use multipart/form-data.",
+    )
