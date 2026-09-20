@@ -4,10 +4,10 @@ import os
 from typing import List
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, OpenAIError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from starlette.datastructures import UploadFile
 
 from schemas.weather import WeatherContextResponse
@@ -48,7 +48,28 @@ ANALYZE_SCHEMA = {
             "type": "array",
             "items": {"type": "string"},
         },
-        "calculation": {"type": "null"},
+        "calculation": {
+            "anyOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "needed": {"type": "boolean"},
+                        "fertilizer": {"type": "string"},
+                        "application_rate_kg_per_ha": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                        },
+                    },
+                    "required": [
+                        "needed",
+                        "fertilizer",
+                        "application_rate_kg_per_ha",
+                    ],
+                },
+            ]
+        },
         "follow_up_question": {"type": "string"},
     },
     "required": ["problem", "solutions", "calculation", "follow_up_question"],
@@ -58,6 +79,8 @@ ANALYZE_SCHEMA = {
 class AnalyzeRequest(BaseModel):
     crop: str
     description: str
+    city: str
+    area_ha: float | None = Field(default=None, gt=0)
 
 
 class Problem(BaseModel):
@@ -65,10 +88,31 @@ class Problem(BaseModel):
     confidence: float
 
 
+class CalculationRecommendation(BaseModel):
+    needed: bool
+    fertilizer: str
+    application_rate_kg_per_ha: float = Field(gt=0)
+
+
+class Calculation(BaseModel):
+    needed: bool
+    fertilizer: str
+    application_rate_kg_per_ha: float = Field(gt=0)
+    area_ha: float = Field(gt=0)
+    total_amount_kg: float = Field(gt=0)
+
+
+class OpenAIAnalysisResponse(BaseModel):
+    problem: Problem
+    solutions: List[str]
+    calculation: CalculationRecommendation | None = None
+    follow_up_question: str
+
+
 class AnalyzeResponse(BaseModel):
     problem: Problem
     solutions: List[str]
-    calculation: None = None
+    calculation: Calculation | None = None
     follow_up_question: str
 
 
@@ -82,18 +126,25 @@ def get_openai_client() -> OpenAI:
     return OpenAI()
 
 
-def validate_text_payload(crop: str, description: str) -> AnalyzeRequest:
+def validate_text_payload(
+    crop: str,
+    description: str,
+    city: str,
+    area_ha: str | None,
+) -> AnalyzeRequest:
     try:
         return AnalyzeRequest.model_validate(
             {
                 "crop": crop,
                 "description": description,
+                "city": city,
+                "area_ha": area_ha or None,
             }
         )
     except ValidationError as exc:
         raise HTTPException(
             status_code=422,
-            detail="Crop and description are required.",
+            detail="Crop, description, and city are required. Area must be a positive number.",
         ) from exc
 
 
@@ -121,15 +172,43 @@ async def read_image_upload(image: UploadFile) -> str:
     return f"data:{image.content_type};base64,{encoded_image}"
 
 
-def build_input(crop: str, description: str, image_data_url: str | None = None):
+def build_input(
+    crop: str,
+    description: str,
+    city: str,
+    weather_context: WeatherContextResponse,
+    area_ha: float | None = None,
+    image_data_url: str | None = None,
+):
+    weather_context = WeatherContextResponse.model_validate(weather_context)
+    historical = weather_context.historical
+    forecast = weather_context.forecast
+    area_line = f"Field area: {area_ha} ha\n" if area_ha is not None else ""
     prompt = (
         f"Crop: {crop}\n"
         f"Description: {description}\n\n"
+        f"Location: {city}\n"
+        f"{area_line}"
+        "Historical weather, last 14 days:\n"
+        f"- average temperature: {historical.average_temperature} °C\n"
+        f"- total precipitation: {historical.total_precipitation} mm\n"
+        f"- average humidity: {historical.average_humidity} %\n\n"
+        "Forecast, next 7 days:\n"
+        f"- average temperature: {forecast.average_temperature} °C\n"
+        f"- total precipitation: {forecast.total_precipitation} mm\n\n"
         "Analyze the plant image when provided together with the crop name and "
-        "symptom description. Provide a preliminary likely problem, confidence "
-        "from 0 to 1, practical next steps, calculation as null, and one "
+        "symptom description. Weather is additional context, not proof of the "
+        "cause of a disease. Use it cautiously when explaining possibilities. "
+        "Provide a preliminary likely problem, confidence from 0 to 1, practical "
+        "next steps, an optional fertilizer recommendation, and one "
         "follow-up question. If the image is not informative enough, say so in "
-        "the result and ask for the most useful next detail or photo."
+        "the result and ask for the most useful next detail or photo. "
+        "Always write every user-facing field in Russian. If fertilizer is not "
+        "appropriate, return calculation as null. Return only the application "
+        "rate in kg/ha; do not calculate total amount. When field area is "
+        "provided, give a fertilizer recommendation whenever it is reasonably "
+        "appropriate for the identified problem; do not omit it merely because "
+        "the area is present."
     )
 
     if not image_data_url:
@@ -153,7 +232,11 @@ def build_input(crop: str, description: str, image_data_url: str | None = None):
     ]
 
 
-def request_openai_analysis(payload: AnalyzeRequest, image_data_url: str | None = None) -> AnalyzeResponse:
+def request_openai_analysis(
+    payload: AnalyzeRequest,
+    weather_context: WeatherContextResponse,
+    image_data_url: str | None = None,
+) -> AnalyzeResponse:
     client = get_openai_client()
 
     try:
@@ -166,9 +249,21 @@ def request_openai_analysis(payload: AnalyzeRequest, image_data_url: str | None 
                 "Return only the structured JSON requested by the schema. "
                 "Do not claim certainty or invent details that cannot be "
                 "determined from the image and text. This is not a replacement "
-                "for lab or field diagnostics."
+                "for lab or field diagnostics. Weather is only additional context, "
+                "never proof of a disease cause. "
+                "Always respond in Russian."
+                "All fields in the structured response must contain Russian text."
+                "Use Russian names for plant diseases and recommendations."
+                "Scientific Latin names may be included in parentheses when useful."
             ),
-            input=build_input(payload.crop, payload.description, image_data_url),
+            input=build_input(
+                payload.crop,
+                payload.description,
+                payload.city,
+                weather_context,
+                payload.area_ha,
+                image_data_url,
+            ),
             text={
                 "format": {
                     "type": "json_schema",
@@ -179,8 +274,26 @@ def request_openai_analysis(payload: AnalyzeRequest, image_data_url: str | None 
             },
         )
 
-        data = json.loads(response.output_text)
-        return AnalyzeResponse.model_validate(data)
+        data = OpenAIAnalysisResponse.model_validate(json.loads(response.output_text))
+        calculation = None
+        if data.calculation and data.calculation.needed and payload.area_ha is not None:
+            calculation = Calculation(
+                needed=True,
+                fertilizer=data.calculation.fertilizer,
+                application_rate_kg_per_ha=data.calculation.application_rate_kg_per_ha,
+                area_ha=payload.area_ha,
+                total_amount_kg=round(
+                    payload.area_ha * data.calculation.application_rate_kg_per_ha,
+                    2,
+                ),
+            )
+
+        return AnalyzeResponse(
+            problem=data.problem,
+            solutions=data.solutions,
+            calculation=calculation,
+            follow_up_question=data.follow_up_question,
+        )
 
     except (APIConnectionError, APITimeoutError) as exc:
         raise HTTPException(
@@ -215,6 +328,8 @@ async def analyze_crop(request: Request) -> AnalyzeResponse:
         payload = validate_text_payload(
             crop=str(form.get("crop") or ""),
             description=str(form.get("description") or ""),
+            city=str(form.get("city") or ""),
+            area_ha=str(form.get("area_ha") or ""),
         )
 
         image = form.get("image")
@@ -225,7 +340,8 @@ async def analyze_crop(request: Request) -> AnalyzeResponse:
             )
 
         image_data_url = await read_image_upload(image)
-        return request_openai_analysis(payload, image_data_url)
+    weather_context = get_weather_for_city(payload.city)
+    return request_openai_analysis(payload, weather_context, image_data_url)
 
     if content_type.startswith("application/json"):
         try:
@@ -233,10 +349,11 @@ async def analyze_crop(request: Request) -> AnalyzeResponse:
         except (json.JSONDecodeError, ValidationError) as exc:
             raise HTTPException(
                 status_code=422,
-                detail="Crop and description are required.",
+                detail="Crop, description, and city are required. Area must be a positive number.",
             ) from exc
 
-        return request_openai_analysis(payload)
+        weather_context = get_weather_for_city(payload.city)
+        return request_openai_analysis(payload, weather_context)
 
     raise HTTPException(
         status_code=415,
@@ -244,27 +361,16 @@ async def analyze_crop(request: Request) -> AnalyzeResponse:
     )
 
 
-@app.get("/api/weather", response_model=WeatherContextResponse)
-def get_weather(city: str | None = None, latitude: float | None = None, longitude: float | None = None) -> WeatherContextResponse:
-    if city is not None:
-        try:
-            latitude, longitude = get_coordinates_for_city(city)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    if latitude is None or longitude is None:
-        raise HTTPException(
-            status_code=422,
-            detail="Either city or both latitude and longitude must be provided.",
-        )
-
-    if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
-        raise HTTPException(
-            status_code=422,
-            detail="Latitude must be between -90 and 90, longitude between -180 and -180.",
-        )
-
+def get_weather_for_city(city: str) -> WeatherContextResponse:
     try:
+        latitude, longitude = get_coordinates_for_city(city)
         return get_weather_context(latitude=latitude, longitude=longitude)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except WeatherServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@app.get("/api/weather", response_model=WeatherContextResponse)
+async def weather_for_city(city: str = Query(..., min_length=1)) -> WeatherContextResponse:
+    return get_weather_for_city(city)
