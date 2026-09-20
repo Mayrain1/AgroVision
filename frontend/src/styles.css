@@ -209,6 +209,36 @@ button:disabled {
   font-weight: 700;
 }
 
+.weather-panel {
+  grid-column: 2;
+  border: 1px solid #d9e2d2;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 48px rgba(58, 76, 52, 0.12);
+  padding: 24px;
+}
+
+.weather-form {
+  display: grid;
+  gap: 14px;
+}
+
+.weather-result {
+  margin-top: 20px;
+  padding-top: 10px;
+  border-top: 1px solid #d9e2d2;
+}
+
+.weather-result ul {
+  margin: 0 0 18px;
+  padding-left: 20px;
+}
+
+.weather-error {
+  margin-top: 14px;
+  grid-column: auto;
+}
+
 .result {
   grid-column: 2;
   padding: 24px;

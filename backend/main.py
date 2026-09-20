@@ -10,6 +10,10 @@ from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, OpenAI
 from pydantic import BaseModel, ValidationError
 from starlette.datastructures import UploadFile
 
+from schemas.weather import WeatherContextResponse
+from services.geocoding_service import get_coordinates_for_city
+from services.weather_service import WeatherServiceError, get_weather_context
+
 load_dotenv()
 app = FastAPI(title="AgroVision API")
 
@@ -238,3 +242,29 @@ async def analyze_crop(request: Request) -> AnalyzeResponse:
         status_code=415,
         detail="Unsupported request type. Use multipart/form-data.",
     )
+
+
+@app.get("/api/weather", response_model=WeatherContextResponse)
+def get_weather(city: str | None = None, latitude: float | None = None, longitude: float | None = None) -> WeatherContextResponse:
+    if city is not None:
+        try:
+            latitude, longitude = get_coordinates_for_city(city)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if latitude is None or longitude is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Either city or both latitude and longitude must be provided.",
+        )
+
+    if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+        raise HTTPException(
+            status_code=422,
+            detail="Latitude must be between -90 and 90, longitude between -180 and -180.",
+        )
+
+    try:
+        return get_weather_context(latitude=latitude, longitude=longitude)
+    except WeatherServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc

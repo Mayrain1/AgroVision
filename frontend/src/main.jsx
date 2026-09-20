@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 const API_URL = "http://localhost:8000/api/analyze";
+const WEATHER_API_URL = "http://localhost:8000/api/weather";
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
@@ -14,6 +15,10 @@ function App() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [city, setCity] = useState("Усть-Каменогорск");
+  const [weather, setWeather] = useState(null);
+  const [weatherError, setWeatherError] = useState("");
+  const [isWeatherLoading, setIsWeatherLoading] = useState(false);
   const fileInputRef = useRef(null);
 
   function clearImage() {
@@ -100,6 +105,33 @@ function App() {
     }
   }
 
+  async function handleWeatherSubmit(event) {
+    event.preventDefault();
+    setWeatherError("");
+    setWeather(null);
+    setIsWeatherLoading(true);
+
+    try {
+      const params = new URLSearchParams({ city });
+      const response = await fetch(`${WEATHER_API_URL}?${params.toString()}`);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null);
+        throw new Error(errorData?.detail || "Backend вернул ошибку погоды.");
+      }
+
+      const data = await response.json();
+      setWeather(data);
+    } catch (requestError) {
+      setWeatherError(
+        requestError.message ||
+          "Не удалось получить погоду. Проверьте, что backend запущен."
+      );
+    } finally {
+      setIsWeatherLoading(false);
+    }
+  }
+
   return (
     <main className="page">
       <section className="app-shell">
@@ -169,6 +201,51 @@ function App() {
             {isLoading ? "Анализ..." : "Анализировать"}
           </button>
         </form>
+
+        <section className="weather-panel">
+          <h2>Погодный контекст</h2>
+          <form className="weather-form" onSubmit={handleWeatherSubmit}>
+            <label>
+              Город или регион
+              <input
+                type="text"
+                value={city}
+                onChange={(event) => setCity(event.target.value)}
+                placeholder="Например: Усть-Каменогорск"
+                required
+              />
+            </label>
+
+            <button type="submit" disabled={isWeatherLoading}>
+              {isWeatherLoading ? "Загрузка..." : "Получить погоду"}
+            </button>
+          </form>
+
+          {weatherError && <p className="error weather-error">{weatherError}</p>}
+
+          {weather && (
+            <div className="weather-result">
+              <h3>Последние 14 дней</h3>
+              <ul>
+                <li>
+                  Средняя температура: {weather.historical.average_temperature} °C
+                </li>
+                <li>Осадки: {weather.historical.total_precipitation} mm</li>
+                <li>
+                  Средняя влажность: {weather.historical.average_humidity} %
+                </li>
+              </ul>
+
+              <h3>Следующие 7 дней</h3>
+              <ul>
+                <li>
+                  Средняя температура: {weather.forecast.average_temperature} °C
+                </li>
+                <li>Осадки: {weather.forecast.total_precipitation} mm</li>
+              </ul>
+            </div>
+          )}
+        </section>
 
         {error && <p className="error">{error}</p>}
 
